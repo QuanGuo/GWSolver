@@ -1,6 +1,6 @@
 """
-2D Steady-State Groundwater Flow Solver Module.
-This module implements finite element methods to solve steady-state groundwater flow equations.
+Groundwater Flow Solver Module.
+This module implements finite element methods to solve steady-state & transient groundwater flow equations.
 """
 
 import numpy as np
@@ -10,8 +10,7 @@ import matplotlib.pyplot as plt
 import pyamg
 from scipy.sparse.linalg import cg
 from sympy import symbols, diff, integrate
-import mat73
-import os
+
 from .utils import plot_comparison_and_compute_errors
 
 
@@ -179,56 +178,122 @@ def calculate_flux(head_solved, K, numnodx, numnody, dx, dy):
 
     return qx, qy
 
-
-def test_solver_accuracy(mat_filename, plot_flag=False):
+def assemble_transient_matrix(numnodx, numnody, fe0, K):
     """
-    Test the solver accuracy by comparing the results with a reference solution.
-    """
-    # Convert relative path to absolute path
-    if not os.path.isabs(mat_filename):
-        mat_filename = os.path.join(os.path.dirname(os.path.abspath(__file__)), mat_filename)
-        
-    mat_data = mat73.loadmat(mat_filename)
-    head = mat_data['head']
-    logK = mat_data['logK']
-    q_original = -mat_data['Q']
-    pump_well_loc = int(mat_data['pump_well_loc']) - 1 # matlab index starts from 1, numpy starts from 0
-    print(pump_well_loc)
-    print(logK.shape)
-    print(head.shape)
+    Assemble the global matrix for transient groundwater flow.
 
-    nx=ny=1024
-    numnodx, numnody = nx + 1, ny + 1
+    Args:
+        numnodx (int): Number of nodes in x direction.
+        numnody (int): Number of nodes in y direction.
+        fe0 (ndarray): Element stiffness matrix.
+        K (ndarray): Permeability field.
+        Ss (ndarray): Specific storage field.
+        dt (float): Time step.
+
+    Returns:
+        scipy.sparse.csr_matrix: Assembled global matrix for the transient flow.
+    """
+    numel = (numnodx - 1) * (numnody - 1)
     numnod = numnodx * numnody
-    Lox, Loy = 320.0, 320.0 # domain real size, m
-    dx, dy = Lox / nx, Loy / ny
+
+    quotient, remainder = divmod(np.arange(numel), numnodx - 1)
+    connect_mat = np.column_stack((
+        remainder + quotient * numnodx,
+        remainder + quotient * numnodx + 1,
+        remainder + quotient * numnodx + numnodx,
+        remainder + quotient * numnodx + numnodx + 1
+    ))
+
+    # Stiffness matrix for the flow term
+    sctr_rows = connect_mat.repeat(4, axis=1).flatten()
+    sctr_cols = np.tile(connect_mat, 4).flatten()
+    ke_values = (fe0 * K[:, None, None]).reshape(numel, -1).flatten()
+    bigk_flow = sp.coo_matrix((ke_values, (sctr_rows, sctr_cols)), shape=(numnod, numnod)).tocsr()
+
+    return bigk_flow
+
+def transient_groundwater_solver(K, well_node, Q, initial_head, dt, t_max):
+    """
+    Solve transient groundwater flow.
+
+    Args:
+        K (ndarray): Permeability field.
+        Ss (ndarray): Specific storage field.
+        Q (ndarray): Source/sink term.
+        initial_head (ndarray): Initial hydraulic head.
+        numnodx (int): Number of nodes in x direction.
+        numnody (int): Number of nodes in y direction.
+        fe0 (ndarray): Element stiffness matrix.
+        dt (float): Time step.
+        t_max (float): Maximum simulation time.
+
+    Returns:
+        ndarray: Hydraulic head solutions over time.
+    """
+    numel = K.shape[0]
+    nx = ny = int(np.sqrt(numel))
+    numnodx = numnody = nx + 1
+    numnod = numnodx * numnody
+    dx = dy = 320.0/ nx
+    Ss = 1e-4 * dx * dy  # Specific storage
+
     stiffness = elemstiff2d(4, dx, dy)
     
-    K = np.exp(logK.flatten())  # Generate K without extra dimension
+    num_timesteps = int(t_max / dt)
 
-    # Flux density (in m³/s per m²)
-    Q = q_original / dx /dy * 3600
+    left_boundary = np.arange(numnody) * numnodx
+    right_boundary = left_boundary + (numnodx - 1)
+    dirichlet_nodes = np.concatenate((left_boundary, right_boundary))
 
-    t0 = time.time()
-    solution_full = groundwater_solver(K, pump_well_loc, Q)
-    head_solved = solution_full.reshape((numnodx, numnody))
+    solution_full = np.zeros(numnod)
+    solution_full[left_boundary] = 0.0
+    solution_full[right_boundary] = 0.0
+    dirichlet_values = solution_full[dirichlet_nodes]
+
+    force = np.zeros(numnod)
+
+    # Ax = b
+    # A11*x1 +A12*x2 + ... A1n*xn = b1
+    # A21*x1 +A22*x2 + ... A2n*xn = b2
+    # ...
+    # An1*x1 +An2*x2 + ... Ann*xn = bn
     
-    print("Elapsed time for solving system:", time.time() - t0)
     
-    # Compute error metrics
-    L1_err = np.abs(head_solved.flatten() - head.flatten()).sum()
-    L2_err = np.square(head_solved.flatten() - head.flatten()).sum()
-    Max_err = np.square(head_solved.flatten() - head.flatten()).max()
+    # Assemble the transient matrix
+    bigk = assemble_transient_matrix(numnodx, numnody, stiffness, K)
+    
+    # Adjust the transient matrix by adding Ss/dt to the diagonal
+    bigk_transient = bigk + sp.eye(numnod, format='csr') * (Ss / dt)
+    
+    force = apply_dirichlet_conditions(bigk_transient, force, dirichlet_nodes, dirichlet_values)
+    
+    force[well_node] = Q
+    
+    mask = np.ones(numnod, dtype=bool)
+    mask[dirichlet_nodes] = False
+
+    bigk_reduced = bigk_transient[mask, :][:, mask]
+    force_reduced = force[mask]
+
+    # Initial conditions
+    head = initial_head.copy()[mask]
+    
+    head_over_time = np.empty((num_timesteps, numnod), dtype=np.float64)
+    
+    # Solve the system
+    ml = pyamg.ruge_stuben_solver(bigk_reduced)
         
-    print(f"L1 Error: {L1_err:.6e}")
-    print(f"L2 Error: {L2_err:.6e}")
-    print(f"Maximum Error: {Max_err:.6e}")
-
-    if plot_flag:
-        plot_comparison_and_compute_errors(head, head_solved)
+    # Time-stepping loop
+    for step in range(num_timesteps):
+        # Update right-hand side: mass_matrix @ head + Q
+        rhs = (Ss / dt) * head + force_reduced
 
 
-# Example usage
-if __name__ == "__main__":
+        head, _ = sp.linalg.cg(bigk_reduced, rhs, M=ml.aspreconditioner())
 
-    test_solver_accuracy("./data/benchmark_1024.mat", plot_flag=True)
+        # Store the result for this timestep
+        head_over_time[step, mask] = head
+    
+    head_over_time[:, ~mask] = dirichlet_values
+
+    return head_over_time
