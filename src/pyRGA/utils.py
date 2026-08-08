@@ -1,192 +1,127 @@
 import numpy as np
 import matplotlib.pyplot as plt
 import os
+from pathlib import Path
+from matplotlib.colors import Normalize, LogNorm
 import numpy.typing as npt
 import typing
-from matplotlib.colors import Normalize, LogNorm
+
+DEFAULT_FIG_DIR = os.path.abspath(os.path.join(os.path.dirname(__file__), '..', '..', 'figures'))
+Path(DEFAULT_FIG_DIR).mkdir(parents=True, exist_ok=True)
 
 def visualiztion_one2one_3D(self, fields_prior: npt.NDArray[np.float32], fields_pred: npt.NDArray[np.float32],
-                            sims: int, property_name: str, plot_range: typing.Tuple = (126, 125, 110)):
+                            sims: int, property_name: str, plot_range: typing.Tuple = (126, 125, 110),
+                            figname: str = "visualiztion_one2one_3D", savefig: bool = True):
     """
     Visualize 3D fields for prior and predicted results side by side, and save them as images.
-
-    Args:
-        fields_prior (ndarray): 3D array of prior fields.
-        fields_pred (ndarray): 3D array of predicted fields.
-        sims (int): Simulation index or "mean" for averaging.
-        property_name (str): Property name (e.g., "PORO", "PERMXY", "PERMZ").
-        plot_range (tuple): Range of the plot in (x, y, z).
     """
     x_range, y_range, z_range = plot_range
-
-    # Extract the relevant 3D field for prior and predicted results
     field_prior = self.get_field(fields_prior, property_name, sims, x_range, y_range, z_range)
     field_pred = self.get_field(fields_pred, property_name, sims, x_range, y_range, z_range)
+    norm = Normalize(vmin=field_prior.min(), vmax=field_prior.max()) if property_name == "PORO" \
+        else LogNorm(vmin=field_prior.min(), vmax=field_prior.max())
 
-    # Normalize and setup colormap for visualization
-    if property_name == "PORO":
-        norm = Normalize(vmin=field_prior.min(), vmax=field_prior.max())
-    else:
-        norm = LogNorm(vmin=field_prior.min(), vmax=field_prior.max())
+    prior_figname = os.path.join(DEFAULT_FIG_DIR, f"{figname}_prior_{property_name}_{sims}_{x_range}x{y_range}x{z_range}.png")
+    pred_figname = os.path.join(DEFAULT_FIG_DIR, f"{figname}_pred_{property_name}_{sims}_{x_range}x{y_range}x{z_range}.png")
 
-    # Ensure the output directory exists
-    os.makedirs(f'{self.output_dir}/figures', exist_ok=True)
-
-    # Plot the predicted field
     self.plot_3D_surface(
         data=field_pred,
         property_name=property_name,
         norm=norm,
-        figname=os.path.join(f'{self.output_dir}/figures', f"LANL_hm_{property_name}_{sims}_{x_range}x{y_range}x{z_range}.png")
+        figname=pred_figname,
+        savefig=savefig
     )
-
-    # Plot the prior field
     self.plot_3D_surface(
         data=field_prior,
         property_name=property_name,
         norm=norm,
-        figname=os.path.join(f'{self.output_dir}/figures', f"LANL_prior_{property_name}_{sims}_{x_range}x{y_range}x{z_range}.png")
+        figname=prior_figname,
+        savefig=savefig
     )
 
-def plot_3D_surface(data: npt.NDArray[np.float32], property_name: str, norm, figname):
+def plot_3D_surface(data: npt.NDArray[np.float32], property_name: str, norm, figname: str = "plot_3D_surface.png", savefig: bool = True):
     """
     Plot a 3D surface of the given data and save the visualization.
-
-    Args:
-        data (ndarray): 3D array representing the data to be visualized.
-        property_name (str): Property name to be used in titles and labels.
-        norm: Normalization function for colormap.
-        figname (str): Filename to save the plot.
+    Returns the matplotlib figure object for further manipulation.
     """
     fig = plt.figure(figsize=(8, 6))
     ax = fig.add_subplot(111, projection='3d')
-
     label_fontsize = 10
     title_fontsize = 12
-
-    ax.zaxis.set_rotate_label(False)  # Disable automatic rotation for Z label
     ax.set_zlabel('Cell Grid ID (Z)', fontsize=label_fontsize, rotation=90)
+    cmap = plt.get_cmap('viridis')
 
-    cmap = plt.get_cmap('viridis')  # Set colormap for visualization
-
-    # Helper function to plot individual surfaces
     def plot_surface(array, x, y, z):
         ax.plot_surface(x, y, z, facecolors=cmap(norm(array)), rstride=1, cstride=1, shade=False)
 
-    # Get dimensions of the data
     nx, ny, nz = data.shape
-
-    # Plot surfaces for different slices
     z = 0
     y, x = np.meshgrid(np.arange(ny + 1), np.arange(nx + 1))
     plot_surface(np.pad(data[:, :, z], ((0, 1), (0, 1)), mode="edge"), x, y, np.full_like(x, z))
-
     y = ny - 1
     z, x = np.meshgrid(np.arange(nz + 1), np.arange(nx + 1))
     plot_surface(np.pad(data[:, y, :], ((0, 1), (0, 1)), mode="edge"), x, np.full_like(x, ny), z)
-
     x = nx - 1
     z, y = np.meshgrid(np.arange(nz + 1), np.arange(ny + 1))
     plot_surface(np.pad(data[x, :, :], ((0, 1), (0, 1)), mode="edge"), np.full_like(y, nx), y, z)
-
-    # L-shaped surface on x=0
     z_trim, y_trim = np.meshgrid(np.arange(nz + 1), np.arange(ny // 2, ny + 1))
     plot_surface(np.pad(data[0, ny // 2:, :], ((0, 1), (0, 1)), mode="edge"), np.full_like(z_trim, 0), y_trim, z_trim)
 
-    # # Add a colorbar
-    # sm = plt.cm.ScalarMappable(cmap=cmap, norm=norm)
-    # sm.set_array(data)
-    # cbar = fig.colorbar(sm, ax=ax, orientation='vertical', shrink=0.7, pad=0.1)
-
-    # cbar.set_label('Permeability', fontsize=label_fontsize, rotation=270, labelpad=10)
-    # cbar.ax.tick_params(labelsize=label_fontsize)
-
-    # Set axis limits and labels
     ax.set_xlim([0, nx])
     ax.set_ylim([0, ny])
     ax.set_zlim([0, nz])
     ax.set_xlabel('Cell Grid ID (X)', fontsize=label_fontsize)
     ax.set_ylabel('Cell Grid ID (Y)', fontsize=label_fontsize)
-    ax.tick_params(axis='x', labelsize=label_fontsize)
-    ax.tick_params(axis='y', labelsize=label_fontsize)
-    ax.tick_params(axis='z', labelsize=label_fontsize)
-
-    # Title
-
+    ax.tick_params(axis='both', labelsize=label_fontsize)
     ax.set_title(f'{property_name}', fontsize=title_fontsize)
-    plt.show()
-    # Save the figure
-    fig.savefig(figname, transparent=True)
+    plt.tight_layout()
+    if savefig:
+        save_path = os.path.join(DEFAULT_FIG_DIR, figname) if not os.path.isabs(figname) else figname
+        Path(os.path.dirname(save_path)).mkdir(parents=True, exist_ok=True)
+        fig.savefig(save_path, transparent=True)
+    return fig
 
-
-def plot_comparison_and_compute_errors(head, head_solved):
+def plot_comparison_and_compute_errors(head, head_solved, figname: str = "plot_comparison_and_compute_errors.png", savefig: bool = True):
     """
     Plot comparison between Matlab and Python FEM solutions and compute error metrics.
-    Saves plots to .fig folder.
-    
-    Args:
-        head (ndarray): Reference solution from Matlab
-        head_solved (ndarray): Solution from Python solver
-        
-    Returns:
-        tuple: L1, L2 and Max errors between solutions
+    Returns the matplotlib figure object for further manipulation.
     """
-    # Create .fig directory if it doesn't exist
-    if not os.path.exists('.fig'):
-        os.makedirs('.fig')
-        
-    # Create figure with 2 subplots
+    Path(DEFAULT_FIG_DIR).mkdir(exist_ok=True)
     fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(14,6))
-    
-    # Plot settings
-    hmin, hmax = np.min(head.flatten()), np.max(head.flatten())
-    lvls = np.linspace(-10,-0.1,7)
+    hmin, hmax = np.min(head), np.max(head)
+    lvls = np.linspace(-10, -0.1, 7)
     cmp_str = 'RdBu'
-    
-    # First subplot - Matlab solution
     im1 = ax1.pcolormesh(head, cmap='viridis', vmin=hmin, vmax=hmax)
     CT1 = ax1.contour(head, levels=lvls, cmap=cmp_str)
     ax1.clabel(CT1, fontsize=15, inline=True, inline_spacing=1, fmt='%.1f')
     fig.colorbar(im1, ax=ax1)
     ax1.set_title('Matlab FEM')
-    
-    # Second subplot - Python solution  
     im2 = ax2.pcolormesh(head_solved, cmap='viridis', vmin=hmin, vmax=hmax)
     CT2 = ax2.contour(head_solved, levels=lvls, cmap=cmp_str)
     ax2.clabel(CT2, fontsize=15, inline=True, inline_spacing=1, fmt='%.1f')
     fig.colorbar(im2, ax=ax2)
     ax2.set_title('Python FEM')
-    
-    # Save figure
-    plt.savefig('.fig/fem_comparison.png', dpi=300, bbox_inches='tight')
-    
+    plt.tight_layout()
+    if savefig:
+        save_path = os.path.join(DEFAULT_FIG_DIR, figname) if not os.path.isabs(figname) else figname
+        Path(os.path.dirname(save_path)).mkdir(parents=True, exist_ok=True)
+        plt.savefig(save_path, dpi=300, bbox_inches='tight')
+    return fig
 
-def plot_flux_map_streamlines(head_solved, qx, qy, dx, dy):
+def plot_flux_map_streamlines(head_solved, qx, qy, dx, dy, figname: str = "plot_flux_map_streamlines.png", savefig: bool = True):
     """
     Plot the flux map using streamlines.
-
-    Args:
-        head_solved (ndarray): Solved hydraulic head (numnodx x numnody grid).
-        qx (ndarray): Flux in x direction.
-        qy (ndarray): Flux in y direction.
-        dx (float): Element size in x direction.
-        dy (float): Element size in y direction.
+    Returns the matplotlib figure object for further manipulation.
     """
     numnodx, numnody = head_solved.shape
-
-    # Create coordinate grid for plotting
     x = np.linspace(0, dx * (numnodx - 1), numnodx)
     y = np.linspace(0, dy * (numnody - 1), numnody)
     X, Y = np.meshgrid(x, y)
-
-    # Reduce flux grid size for visualization
-    # Create coordinate grid for plotting
     speed = np.sqrt(qx**2 + qy**2)
-    lw = 5*speed / speed.max()
-    x = np.linspace(0, dx * (numnodx - 2), numnodx-1)
-    y = np.linspace(0, dy * (numnody - 2), numnody-1)
-    X_mid, Y_mid = np.meshgrid(x, y)
-
+    x_mid = np.linspace(0, dx * (numnodx - 2), numnodx-1)
+    y_mid = np.linspace(0, dy * (numnody - 2), numnody-1)
+    X_mid, Y_mid = np.meshgrid(x_mid, y_mid)
+    Path(DEFAULT_FIG_DIR).mkdir(exist_ok=True)
     plt.figure(figsize=(10, 8))
     plt.contourf(X, Y, head_solved, levels=20, cmap='viridis', alpha=1)
     plt.colorbar(label="Hydraulic Head")
@@ -194,235 +129,250 @@ def plot_flux_map_streamlines(head_solved, qx, qy, dx, dy):
     plt.title("Streamlines with Hydraulic Head Contours")
     plt.xlabel("X")
     plt.ylabel("Y")
-    plt.savefig(".fig/flux_map_streamlines.png", dpi=300, transparent=True)
+    plt.tight_layout()
+    if savefig:
+        save_path = os.path.join(DEFAULT_FIG_DIR, figname) if not os.path.isabs(figname) else figname
+        Path(os.path.dirname(save_path)).mkdir(parents=True, exist_ok=True)
+        plt.savefig(save_path, dpi=300, transparent=True)
+    return plt.gcf()
 
-
-def plot_history(history, save_path='./figs/optimization_history.png'):
+def plot_history(history, figname: str = "plot_history.png", savefig: bool = True):
     """
     Plot optimization history including loss, lambda, step norm and computation time.
-    
-    Args:
-        history (dict): Dictionary containing optimization history with keys:
-            'loss', 'lambda', 'step_norm', 'time'
+    Returns the matplotlib figure object for further manipulation.
     """
     fig, ((ax1, ax2), (ax3, ax4)) = plt.subplots(2, 2, figsize=(12, 8))
-    
-    # Plot loss history
     ax1.semilogy(history['loss'])
     ax1.set_xlabel('Iteration')
     ax1.set_ylabel('Loss')
     ax1.set_title('Loss History')
     ax1.grid(True)
-
-    # Plot lambda history 
     ax2.semilogy(history['lambda'])
     ax2.set_xlabel('Iteration')
     ax2.set_ylabel('Lambda')
     ax2.set_title('Lambda History')
     ax2.grid(True)
-
-    # Plot step norm history
     ax3.semilogy(history['step_norm'])
     ax3.set_xlabel('Iteration')
     ax3.set_ylabel('Step Norm')
     ax3.set_title('Step Norm History')
     ax3.grid(True)
-
-    # Plot computation time
     ax4.plot(history['time'])
     ax4.set_xlabel('Iteration')
     ax4.set_ylabel('Time (s)')
     ax4.set_title('Computation Time')
     ax4.grid(True)
-
     plt.tight_layout()
-    plt.savefig(save_path, dpi=100, bbox_inches='tight')
-    plt.close()
+    if savefig:
+        save_path = os.path.join(DEFAULT_FIG_DIR, figname) if not os.path.isabs(figname) else figname
+        Path(os.path.dirname(save_path)).mkdir(parents=True, exist_ok=True)
+        plt.savefig(save_path, dpi=100, bbox_inches='tight')
+    return fig
 
-def plot_parameter_history(history, V, beta=0, save_path='./figs/parameter_history.png' ):
+def plot_parameter_history(history, V, beta=0, figname: str = "plot_parameter_history.png", savefig: bool = True):
     """
     Plot the evolution of the parameter field during optimization.
-    
-    Args:
-        history (dict): Dictionary containing optimization history
-        V (ndarray): Matrix of basis functions
-        beta (float): Mean of random field (default 0)
+    Returns the matplotlib figure object for further manipulation.
     """
     n_iters = len(history['b'])
-    n_cols = min(5, n_iters)  # Show max 5 iterations per row
+    n_cols = min(5, n_iters)
     n_rows = (n_iters + n_cols - 1) // n_cols
-    
     fig, axes = plt.subplots(n_rows, n_cols, figsize=(4*n_cols, 4*n_rows))
-    if n_rows == 1:
-        axes = axes.reshape(1, -1)
-        
+    axes = np.atleast_2d(axes)
     for i in range(n_iters):
-        row = i // n_cols
-        col = i % n_cols
-        
-        # Transform b to parameter field
+        row, col = divmod(i, n_cols)
         s = V.T @ history['b'][i][:, np.newaxis] + beta
-        
         im = axes[row, col].imshow(s.reshape(-1, int(np.sqrt(len(s)))), cmap='jet')
         axes[row, col].set_title(f'Iteration {i}')
         plt.colorbar(im, ax=axes[row, col])
-        
-    # Remove empty subplots
-    for i in range(i+1, n_rows * n_cols):
-        row = i // n_cols
-        col = i % n_cols
+    for i in range(n_iters, n_rows * n_cols):
+        row, col = divmod(i, n_cols)
         fig.delaxes(axes[row, col])
-        
     plt.tight_layout()
-    plt.savefig(save_path, dpi=100, bbox_inches='tight')
-    plt.close()
+    if savefig:
+        save_path = os.path.join(DEFAULT_FIG_DIR, figname) if not os.path.isabs(figname) else figname
+        Path(os.path.dirname(save_path)).mkdir(parents=True, exist_ok=True)
+        plt.savefig(save_path, dpi=100, bbox_inches='tight')
+    return fig
 
-def plot_conductivity_fields(reconstructed_field, true_field, nx, ny, save_path='./figs/conductivity_fields.png'):
-        """
-        Plot and compare reconstructed and true conductivity fields
-        
-        Args:
-            reconstructed_field: The reconstructed conductivity field
-            true_field: The true conductivity field 
-            nx: Number of grid points in x direction
-            ny: Number of grid points in y direction
-            save_path: Path to save the figure
-        """
-        fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(14, 6))
-        
-        # Get global min and max for consistent colorbar scale
-        vmin = min(reconstructed_field.min(), true_field.min())
-        vmax = max(reconstructed_field.max(), true_field.max())
-        
-        # Plot reconstructed field
-        im1 = ax1.pcolormesh(reconstructed_field.reshape((nx, ny)), cmap='jet', vmin=vmin, vmax=vmax)
-        fig.colorbar(im1, ax=ax1)
-        ax1.set_title('Reconstructed Conductivity Field')
-        
-        # Plot true field  
-        im2 = ax2.pcolormesh(true_field.reshape((nx, ny)), cmap='jet', vmin=vmin, vmax=vmax)
-        fig.colorbar(im2, ax=ax2)
-        ax2.set_title('True Conductivity Field')
-        
-        plt.tight_layout()
-        plt.savefig(save_path, dpi=300, bbox_inches='tight')
-        plt.show()
-
-def plot_parameters(true_alpha, predicted_alpha, save_path='./figs/parameters.png'):
+def plot_conductivity_fields(reconstructed_field, true_field, nx, ny, figname: str = "plot_conductivity_fields.png", savefig: bool = True):
     """
-    Create a 45-degree cross-plot comparing true and predicted parameters
-    
-    Args:
-        true_alpha: True parameter values
-        predicted_alpha: Predicted parameter values 
-        save_path: Path to save the figure
+    Plot and compare reconstructed and true conductivity fields.
+    Returns the matplotlib figure object for further manipulation.
+    """
+    fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(14, 6))
+    vmin = min(reconstructed_field.min(), true_field.min())
+    vmax = max(reconstructed_field.max(), true_field.max())
+    im1 = ax1.pcolormesh(reconstructed_field.reshape((nx, ny)), cmap='jet', vmin=vmin, vmax=vmax)
+    fig.colorbar(im1, ax=ax1)
+    ax1.set_title('Reconstructed Conductivity Field')
+    im2 = ax2.pcolormesh(true_field.reshape((nx, ny)), cmap='jet', vmin=vmin, vmax=vmax)
+    fig.colorbar(im2, ax=ax2)
+    ax2.set_title('True Conductivity Field')
+    plt.tight_layout()
+    if savefig:
+        save_path = os.path.join(DEFAULT_FIG_DIR, figname) if not os.path.isabs(figname) else figname
+        Path(os.path.dirname(save_path)).mkdir(parents=True, exist_ok=True)
+        plt.savefig(save_path, dpi=300, bbox_inches='tight')
+    return fig
+
+def plot_parameters(true_alpha, predicted_alpha, figname: str = "plot_parameters.png", savefig: bool = True):
+    """
+    Create a 45-degree cross-plot comparing true and predicted parameters.
+    Returns the matplotlib figure object for further manipulation.
     """
     fig, ax = plt.subplots(figsize=(8, 8))
-    
-    # Get axis limits
     min_val = min(np.min(true_alpha), np.min(predicted_alpha))
     max_val = max(np.max(true_alpha), np.max(predicted_alpha))
     buffer = (max_val - min_val) * 0.1
-    
-    # Plot 45 degree line
-    ax.plot([min_val-buffer, max_val+buffer], [min_val-buffer, max_val+buffer], 
-            'k--', alpha=0.5, label='Perfect Match')
-    
-    # Create scatter plot
+    ax.plot([min_val-buffer, max_val+buffer], [min_val-buffer, max_val+buffer], 'k--', alpha=0.5, label='Perfect Match')
     ax.scatter(true_alpha, predicted_alpha, alpha=0.6)
-    
     ax.set_xlabel('True Parameters')
     ax.set_ylabel('Predicted Parameters')
     ax.set_title('Cross-plot of True vs Predicted Parameters')
-    
-    # Set equal aspect ratio and limits
     ax.set_aspect('equal')
     ax.set_xlim(min_val-buffer, max_val+buffer)
     ax.set_ylim(min_val-buffer, max_val+buffer)
-    
     ax.grid(True, alpha=0.3)
     ax.legend()
-    
     plt.tight_layout()
-    plt.savefig(save_path, dpi=300, bbox_inches='tight')
-    plt.close()
+    if savefig:
+        save_path = os.path.join(DEFAULT_FIG_DIR, figname) if not os.path.isabs(figname) else figname
+        Path(os.path.dirname(save_path)).mkdir(parents=True, exist_ok=True)
+        plt.savefig(save_path, dpi=300, bbox_inches='tight')
+    return fig
 
-def plot_observations_vs_predictions(true_heads, predicted_heads, save_path='./figs/observations_vs_predictions.png'):
+def plot_observations_vs_predictions(true_heads, predicted_heads, figname: str = "plot_observations_vs_predictions.png", savefig: bool = True):
     """
-    Create a 45-degree cross-plot comparing true and predicted hydraulic heads
-    
-    Args:
-        true_heads: True hydraulic head values
-        predicted_heads: Predicted hydraulic head values
-        save_path: Path to save the figure
+    Create a 45-degree cross-plot comparing true and predicted hydraulic heads.
+    Returns the matplotlib figure object for further manipulation.
     """
     fig, ax = plt.subplots(figsize=(8, 8))
-    
-    # Get axis limits
     min_val = min(np.min(true_heads), np.min(predicted_heads))
     max_val = max(np.max(true_heads), np.max(predicted_heads))
     buffer = (max_val - min_val) * 0.1
-    
-    # Plot 45 degree line
-    ax.plot([min_val-buffer, max_val+buffer], [min_val-buffer, max_val+buffer], 
-            'k--', alpha=0.5, label='Perfect Match')
-    
-    # Create scatter plot
+    ax.plot([min_val-buffer, max_val+buffer], [min_val-buffer, max_val+buffer], 'k--', alpha=0.5, label='Perfect Match')
     ax.scatter(true_heads, predicted_heads, alpha=0.6)
-    
     ax.set_xlabel('True Hydraulic Heads')
-    ax.set_ylabel('Predicted Hydraulic Heads') 
+    ax.set_ylabel('Predicted Hydraulic Heads')
     ax.set_title('Cross-plot of True vs Predicted Hydraulic Heads')
-    
-    # Set equal aspect ratio and limits
     ax.set_aspect('equal')
     ax.set_xlim(min_val-buffer, max_val+buffer)
     ax.set_ylim(min_val-buffer, max_val+buffer)
-    
     ax.grid(True, alpha=0.3)
     ax.legend()
-    
     plt.tight_layout()
-    plt.savefig(save_path, dpi=300, bbox_inches='tight')
-    plt.close()
+    if savefig:
+        save_path = os.path.join(DEFAULT_FIG_DIR, figname) if not os.path.isabs(figname) else figname
+        Path(os.path.dirname(save_path)).mkdir(parents=True, exist_ok=True)
+        plt.savefig(save_path, dpi=300, bbox_inches='tight')
+    return fig
 
-def plot_head_fields(true_heads, predicted_heads, save_path='./figs/head_fields.png'):
+def plot_head_fields(true_heads, predicted_heads, figname: str = "plot_head_fields.png", savefig: bool = True):
     """
-    Plot and compare true and predicted hydraulic head fields
-    
-    Args:
-        true_heads: Array of true hydraulic head values
-        predicted_heads: Array of predicted hydraulic head values
-        save_path: Path to save the figure
+    Plot and compare true and predicted hydraulic head fields.
+    Returns the matplotlib figure object for further manipulation.
     """
     fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(14, 6))
-    
-    # Plot true head field
-    # Get common colorbar range
     vmin = min(np.min(true_heads), np.min(predicted_heads))
     vmax = max(np.max(true_heads), np.max(predicted_heads))
-    
-    # Plot true head field
     im1 = ax1.imshow(true_heads, cmap='viridis', vmin=vmin, vmax=vmax)
     ax1.set_title('True Hydraulic Head Field')
-    
-    # Plot predicted head field
     im2 = ax2.imshow(predicted_heads, cmap='viridis', vmin=vmin, vmax=vmax)
     ax2.set_title('Predicted Hydraulic Head Field')
-    
-    # Add colorbars for each subplot
     fig.colorbar(im1, ax=ax1)
     fig.colorbar(im2, ax=ax2)
-    
     plt.tight_layout()
-    plt.savefig(save_path, dpi=300, bbox_inches='tight')
-    plt.close()
+    if savefig:
+        save_path = os.path.join(DEFAULT_FIG_DIR, figname) if not os.path.isabs(figname) else figname
+        Path(os.path.dirname(save_path)).mkdir(parents=True, exist_ok=True)
+        plt.savefig(save_path, dpi=300, bbox_inches='tight')
+    return fig
 
-# Example usage
+def plot_transient_head_comparison(head_true, head_solved, time_idx=0, lvls=None, cmp_str='RdBu'):
+    """
+    Plot comparison between true and solved head distributions.
+    """
+    assert head_true.shape == head_solved.shape, "head_true and head_solved must have the same shape"
+    assert len(head_true.shape) == 3, "head_true and head_solved must be 3D arrays"
+    if lvls is None:
+        lvls = np.linspace(-10, -0.1, 7)
+    hmin, hmax = np.min(head_true), np.max(head_true)
+
+    head_true_at_time = head_true[time_idx, :, :]
+    head_solved_at_time = head_solved[time_idx, :, :]
+
+    fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(14, 6))
+    im1 = ax1.pcolormesh(head_true_at_time, cmap='viridis', vmin=hmin, vmax=hmax)
+    CT1 = ax1.contour(head_true_at_time, levels=lvls, cmap=cmp_str)
+    ax1.clabel(CT1, fontsize=15, inline=True, inline_spacing=1, fmt='%.1f')
+    fig.colorbar(im1, ax=ax1)
+    ax1.set_title('Matlab FEM time step {}'.format(time_idx))
+    ax1.set_xlabel('X')
+    ax1.set_ylabel('Y')
+
+    im2 = ax2.pcolormesh(head_solved_at_time, cmap='viridis', vmin=hmin, vmax=hmax)
+    CT2 = ax2.contour(head_solved_at_time, levels=lvls, cmap=cmp_str)
+    ax2.clabel(CT2, fontsize=15, inline=True, inline_spacing=1, fmt='%.1f')
+    fig.colorbar(im2, ax=ax2)
+    ax2.set_title('Python FEM time step {}'.format(time_idx))
+    ax2.set_xlabel('X')
+    ax2.set_ylabel('Y')
+    plt.tight_layout()
+    return fig
+
+def plot_trainsient_hydraulic_heads(transient_heads, t_max=1.0, hmin=-10.0, hmax=0.1, nlvls=0, cmp_str='viridis'):
+    """
+    Plot transient hydraulic heads for multiple wells.
+    """
+    assert len(transient_heads.shape) == 3, "HT_transient_heads must be a 3D array"
+
+    if nlvls > 0:
+        lvls = np.linspace(hmin, hmax, nlvls)
+    else:
+        lvls = np.linspace(hmin, hmax, 7)
+
+    fig, axs = plt.subplots(1, transient_heads.shape[0], figsize=(46, 5))
+    dt = t_max / transient_heads.shape[0]
+    for i in range(transient_heads.shape[0]):
+        axs[i].set_title('Time step {}'.format(i))
+        axs[i].set_xlabel('X')
+        axs[i].set_ylabel('Y')
+        im = axs[i].pcolormesh(transient_heads[i, :, :], cmap=cmp_str, vmin=hmin, vmax=hmax)
+        axs[i].set_title('Time: {:.2f} h'.format(i*dt))
+        CT = axs[i].contour(transient_heads[i, :, :], levels=lvls, cmap=cmp_str)
+        axs[i].clabel(CT, fontsize=10, inline=True, fmt='%.1f')
+        fig.colorbar(im, ax=axs[i])   
+    plt.tight_layout()
+    return fig
+
+def plot_transient_hydraulic_heads_at_timestep(transient_heads, t_idx=1, dt=0.1, hmin=None, hmax=None, nlvls=0, cmp_str='viridis'):
+    """
+    Plot transient hydraulic heads for multiple wells in 2D.
+    """
+    assert len(transient_heads.shape) == 3, "transient_heads must be a 3D array"
+    if hmin is None:
+        hmin = np.min(transient_heads)
+    if hmax is None:
+        hmax = np.max(transient_heads)
+    if nlvls > 0:
+        lvls = np.linspace(hmin, hmax, nlvls)
+    else:
+        lvls = np.linspace(hmin, hmax, 7)
+
+    fig, axs = plt.subplots(1, 1, figsize=(6, 5))
+    axs.set_xlabel('X')
+    axs.set_ylabel('Y')
+    im = axs.pcolormesh(transient_heads[t_idx, :, :], cmap=cmp_str, vmin=hmin, vmax=hmax)
+    CT = axs.contour(transient_heads[t_idx, :, :], levels=lvls, cmap="jet")
+    axs.clabel(CT, fontsize=10, inline=True, fmt='%.1f')
+    fig.colorbar(im, ax=axs)
+    axs.set_title('Time: {:.2f} h'.format((t_idx+1)*dt))
+    plt.tight_layout()
+    return fig
+
 if __name__ == "__main__":
-    # Example usage
-    nx, ny, nz = 16, 16, 8  # Grid dimensions
-    K = np.exp(np.random.rand(nx, ny, nz)-4)  # Heterogeneous permeability
-
+    nx, ny, nz = 16, 16, 8
+    K = np.exp(np.random.rand(nx, ny, nz)-4)
     norm = LogNorm(vmin=K.min(), vmax=K.max())
-    plot_3D_surface(K, "PERM", norm, "example.png")
+    plot_3D_surface(K, "PERM", norm)

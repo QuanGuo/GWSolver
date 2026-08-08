@@ -11,8 +11,6 @@ import pyamg
 from scipy.sparse.linalg import cg
 from sympy import symbols, diff, integrate
 
-from .utils import plot_comparison_and_compute_errors
-
 
 # element stiffness
 def elemstiff2d(nel,hx,hy):
@@ -275,25 +273,83 @@ def transient_groundwater_solver(K, well_node, Q, initial_head, dt, t_max):
     bigk_reduced = bigk_transient[mask, :][:, mask]
     force_reduced = force[mask]
 
-    # Initial conditions
-    head = initial_head.copy()[mask]
+    # Solve the system
+    ml = pyamg.ruge_stuben_solver(bigk_reduced)
     
     head_over_time = np.empty((num_timesteps, numnod), dtype=np.float64)
     
-    # Solve the system
-    ml = pyamg.ruge_stuben_solver(bigk_reduced)
+    # Initial conditions
+    head = initial_head.copy()[mask]
         
     # Time-stepping loop
     for step in range(num_timesteps):
         # Update right-hand side: mass_matrix @ head + Q
         rhs = (Ss / dt) * head + force_reduced
 
-
         head, _ = sp.linalg.cg(bigk_reduced, rhs, M=ml.aspreconditioner())
 
         # Store the result for this timestep
-        head_over_time[step, mask] = head
+        head_over_time[step, mask] = head       
     
     head_over_time[:, ~mask] = dirichlet_values
 
-    return head_over_time
+    return head_over_time   
+
+def groundwater_solver_one_step(K, well_node, Q, head_i, dt):
+    """
+    Advance the groundwater head by one time step using the transient solver.
+
+    Args:
+        K (ndarray): Permeability field.
+        well_node (int): Index of the well location in the grid.
+        Q (float): Pumping rate at the well.
+        head_i (ndarray): Hydraulic head at current time step (flattened array).
+        dt (float): Time step size.
+
+    Returns:
+        ndarray: Hydraulic head at the next time step (flattened array).
+    """
+    numel = K.shape[0]
+    nx = ny = int(np.sqrt(numel))
+    numnodx = numnody = nx + 1
+    numnod = numnodx * numnody
+    dx = dy = 320.0 / nx
+    Ss = 1e-4 * dx * dy  # Specific storage
+
+    stiffness = elemstiff2d(4, dx, dy)
+
+    left_boundary = np.arange(numnody) * numnodx
+    right_boundary = left_boundary + (numnodx - 1)
+    dirichlet_nodes = np.concatenate((left_boundary, right_boundary))
+
+    solution_full = np.zeros(numnod)
+    solution_full[left_boundary] = 0.0
+    solution_full[right_boundary] = 0.0
+    dirichlet_values = solution_full[dirichlet_nodes]
+
+    force = np.zeros(numnod)
+    force[well_node] = Q
+    force = apply_dirichlet_conditions(
+        assemble_transient_matrix(numnodx, numnody, stiffness, K) + sp.eye(numnod, format='csr') * (Ss / dt),
+        force,
+        dirichlet_nodes,
+        dirichlet_values
+    )
+
+    mask = np.ones(numnod, dtype=bool)
+    mask[dirichlet_nodes] = False
+
+    bigk = assemble_transient_matrix(numnodx, numnody, stiffness, K)
+    bigk_transient = bigk + sp.eye(numnod, format='csr') * (Ss / dt)
+    bigk_reduced = bigk_transient[mask, :][:, mask]
+    force_reduced = force[mask]
+
+    ml = pyamg.ruge_stuben_solver(bigk_reduced)
+    head = head_i.copy()[mask]
+    rhs = (Ss / dt) * head + force_reduced
+    head_new, _ = sp.linalg.cg(bigk_reduced, rhs, M=ml.aspreconditioner())
+
+    head_full = np.zeros(numnod)
+    head_full[mask] = head_new
+    head_full[dirichlet_nodes] = dirichlet_values
+    return head_full

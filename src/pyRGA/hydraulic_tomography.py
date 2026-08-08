@@ -11,55 +11,10 @@ from scipy.sparse.linalg import cg
 from mpl_toolkits.axes_grid1 import make_axes_locatable
 from math import ceil
 import time
-
-def apply_dirichlet_conditions(bigk, force, dirichlet_nodes, dirichlet_values):
-    """
-    Apply Dirichlet boundary conditions to the stiffness matrix and force vector.
-    
-    Args:
-        bigk (scipy.sparse.csr_matrix): Global stiffness matrix
-        force (ndarray): Force vector
-        dirichlet_nodes (ndarray): Indices of Dirichlet nodes
-        dirichlet_values (ndarray): Values to impose at the Dirichlet nodes
-        
-    Returns:
-        tuple: (updated stiffness matrix, updated force vector)
-    """
-    dirichlet_contributions = bigk[:, dirichlet_nodes].dot(dirichlet_values)
-    force -= dirichlet_contributions
-    return force
-
-
-def assemble_matrix(numnodx, numnody, stiffness, K):
-    """
-    Assemble the global stiffness matrix for the finite element model.
-    
-    Args:
-        numnodx (int): Number of nodes in x direction
-        numnody (int): Number of nodes in y direction
-        stiffness (ndarray): Local element stiffness matrix
-        K (ndarray): Permeability field
-        
-    Returns:
-        scipy.sparse.csr_matrix: Assembled global stiffness matrix
-    """
-    numel = (numnodx - 1) * (numnody - 1)
-    numnod = numnodx * numnody
-
-    quotient, remainder = divmod(np.arange(numel), numnodx - 1)
-    connect_mat = np.column_stack((
-        remainder + quotient * numnodx,
-        remainder + quotient * numnodx + 1,
-        remainder + quotient * numnodx + numnodx,
-        remainder + quotient * numnodx + numnodx + 1
-    ))
-
-    sctr_rows = connect_mat.repeat(4, axis=1).flatten()
-    sctr_cols = np.tile(connect_mat, 4).flatten()
-    ke_values = (stiffness * K[:, None, None]).reshape(numel, -1).flatten()
-    bigk = sp.coo_matrix((ke_values, (sctr_rows, sctr_cols)), shape=(numnod, numnod)).tocsr()
-
-    return bigk
+import imageio
+from IPython.display import Image, display
+from gwsolver import apply_dirichlet_conditions, assemble_matrix, assemble_transient_matrix
+from utils import plot_transient_hydraulic_heads_at_timestep, DEFAULT_FIG_DIR
 
 
 def hydraulic_tomography(K, well_locs, Q):
@@ -117,6 +72,69 @@ def hydraulic_tomography(K, well_locs, Q):
     
     return HT_heads
 
+def ht_transient(K, well_locs, Q, dt, t_max, initial_head=None):
+    """
+    Placeholder for transient hydraulic tomography.
+    """
+
+    numel = K.shape[0]
+    nx = ny = int(np.sqrt(numel))
+    numnodx = numnody = nx + 1
+    numnod = numnodx * numnody
+    dx = dy = 320.0/ nx
+    Ss = 1e-4 * dx * dy  # Specific storage
+
+    if initial_head is None:
+        initial_head = np.zeros(numnodx*numnody, dtype=np.float64)
+
+    stiffness = np.array([
+        [0.66666667, -0.16666667, -0.16666667, -0.33333333],
+        [-0.16666667, 0.66666667, -0.33333333, -0.16666667],
+        [-0.16666667, -0.33333333, 0.66666667, -0.16666667],
+        [-0.33333333, -0.16666667, -0.16666667, 0.66666667]
+    ])
+
+    num_timesteps = int(t_max / dt)
+
+    left_boundary = np.arange(numnody) * numnodx
+    right_boundary = left_boundary + (numnodx - 1)
+    dirichlet_nodes = np.concatenate((left_boundary, right_boundary))
+    dirichlet_values = np.zeros_like(dirichlet_nodes, dtype=np.float64)
+
+    # Assemble the transient matrix
+    bigk = assemble_transient_matrix(numnodx, numnody, stiffness, K)
+
+    # Adjust the transient matrix by adding Ss/dt to the diagonal
+    bigk_transient = bigk + sp.eye(numnod, format='csr') * (Ss / dt)
+
+    mask = np.ones(numnod, dtype=bool)
+    mask[dirichlet_nodes] = False
+
+    bigk_reduced = bigk_transient[mask, :][:, mask]
+
+    force = np.zeros(numnod)
+    
+    force = apply_dirichlet_conditions(bigk_transient, force, dirichlet_nodes, dirichlet_values)
+
+    # Solve the system
+    ml = pyamg.ruge_stuben_solver(bigk_reduced)
+
+    HT_transient_heads = np.empty((len(well_locs), num_timesteps, numnod), dtype=np.float64)
+
+    # Save initial head for all wells at t=0
+    for i in range(len(well_locs)):
+        HT_transient_heads[i, 0, :] = initial_head.copy()
+
+    for i, well_loc in enumerate(well_locs):
+        force[well_loc] = Q
+        force_reduced = force[mask]
+        for step in range(1, num_timesteps):
+            rhs = (Ss / dt) * HT_transient_heads[i, step - 1, mask] + force_reduced
+            HT_transient_heads[i, step, mask], _ = sp.linalg.cg(bigk_reduced, rhs, M=ml.aspreconditioner())
+            HT_transient_heads[i, step, dirichlet_nodes] = dirichlet_values
+        force[well_loc] = 0.0
+
+    return HT_transient_heads
 
 if __name__ == "__main__":
 
@@ -155,40 +173,67 @@ if __name__ == "__main__":
     HT_heads = hydraulic_tomography(K, well_nodes, Q)
     print("Elapsed time for solving HT:", time.time() - t0)
 
-    # Plot the solution
-    fig, axs = plt.subplots(
-        len(horizontal_relative_locs), 
-        len(vertial_relative_locs), 
-        figsize=(3* len(horizontal_relative_locs), 2.8 * len(vertial_relative_locs)),
-        gridspec_kw={'hspace': 0.5, 'wspace': 0.5}
-    )
-    # fig.subplots_adjust(hspace=0.4, wspace=1)  # Adjust vertical and horizontal spacing
-    axs = axs.flatten()
-    for i, w in enumerate(well_relative_locs):
-        head_solved = HT_heads[i].reshape((numnodx, numnody))
-        im = axs[i].pcolormesh(head_solved, cmap='viridis', shading='auto')
-        CT = axs[i].contour(head_solved, levels=10, colors='white')
-        axs[i].clabel(CT, fontsize=10, inline=True, fmt='%.1f')
-        axs[i].set_title('Pump at ({:d} m, {:d} m)'.format(int(w[0] * Lox), int(w[1] * Loy)))
+    t_max = 2.0
+    nt = 10
+    dt = t_max / nt
+    t0 = time.time()
+    HT_transient_heads = ht_transient(K, well_nodes, Q, dt, t_max)
+    print("Elapsed time for solving HT:", time.time() - t0)
 
-        # Set ticks for the axes
-        x_ticks = np.linspace(0, numnodx - 1, 5)
-        x_labels = np.linspace(0, Lox, 5, dtype=int)
-        axs[i].set_xticks(x_ticks)
-        axs[i].set_xticklabels(x_labels)
-        axs[i].set_xlabel('X (m)')
+    # fig = plot_trainsient_hydraulic_heads(HT_transient_heads[0], t_max=t_max, lvls=None)
+    # fig = plot_transient_hydraulic_heads_at_timestep(HT_transient_heads[0], t_idx=9, dt=dt, hmin=HT_transient_heads[0].min()*0.7, hmax=HT_transient_heads[0].max(), nlvls=7, cmp_str='viridis')
+    # fig.savefig(f"{DEFAULT_FIG_DIR}/transient_heads.png", dpi=100)
 
-        y_ticks = np.linspace(0, numnody - 1, 5)
-        y_labels = np.linspace(0, Loy, 5, dtype=int)
-        axs[i].set_yticks(y_ticks)
-        axs[i].set_yticklabels(y_labels)
-        axs[i].set_ylabel('Y (m)')
-        axs[i].tick_params(axis='y', rotation=90)
+    for i in range(nt):
+        fig = plot_transient_hydraulic_heads_at_timestep(HT_transient_heads[0], t_idx=i, dt=dt, hmin=HT_transient_heads[0].min()*0.7, hmax=HT_transient_heads[0].max(), nlvls=7, cmp_str='viridis')
+        fig.savefig(f"{DEFAULT_FIG_DIR}/transient_heads_{nx}_{i}.png", dpi=100)
+        plt.close(fig)
 
-        divider = make_axes_locatable(axs[i])
-        cax = divider.append_axes("right", size="7%", pad=0.05)  # Adjust size and padding
-        cbar = plt.colorbar(im, cax=cax, ticks=[ceil(head_solved.min()), int(head_solved.max())])
-        cbar.ax.tick_params(labelsize=8, rotation=270)  # Reduce tick font size
-        cbar.set_label('Hydraulic Head (m)', fontsize=10, va="top", rotation=270)  # Adjust label padding
+    # Collect all saved images in order
+    image_files = [f"{DEFAULT_FIG_DIR}/transient_heads_{nx}_{i}.png" for i in range(nt)]
+    images = [imageio.imread(img) for img in image_files]
+    # Save as GIF
+    gif_path = f"{DEFAULT_FIG_DIR}/transient_heads_{nx}.gif"
+    imageio.mimsave(gif_path, images, duration=500)  # Increased duration for longer frame display
+    print(f"GIF saved to {gif_path}")
 
-    plt.show()
+    # Display the GIF animation in the notebook
+    display(Image(filename=gif_path))
+
+    # # Plot the solution
+    # fig, axs = plt.subplots(
+    #     len(horizontal_relative_locs), 
+    #     len(vertial_relative_locs), 
+    #     figsize=(3* len(horizontal_relative_locs), 2.8 * len(vertial_relative_locs)),
+    #     gridspec_kw={'hspace': 0.5, 'wspace': 0.5}
+    # )
+    # # fig.subplots_adjust(hspace=0.4, wspace=1)  # Adjust vertical and horizontal spacing
+    # axs = axs.flatten()
+    # for i, w in enumerate(well_relative_locs):
+    #     head_solved = HT_heads[i].reshape((numnodx, numnody))
+    #     im = axs[i].pcolormesh(head_solved, cmap='viridis', shading='auto')
+    #     CT = axs[i].contour(head_solved, levels=10, colors='white')
+    #     axs[i].clabel(CT, fontsize=10, inline=True, fmt='%.1f')
+    #     axs[i].set_title('Pump at ({:d} m, {:d} m)'.format(int(w[0] * Lox), int(w[1] * Loy)))
+
+    #     # Set ticks for the axes
+    #     x_ticks = np.linspace(0, numnodx - 1, 5)
+    #     x_labels = np.linspace(0, Lox, 5, dtype=int)
+    #     axs[i].set_xticks(x_ticks)
+    #     axs[i].set_xticklabels(x_labels)
+    #     axs[i].set_xlabel('X (m)')
+
+    #     y_ticks = np.linspace(0, numnody - 1, 5)
+    #     y_labels = np.linspace(0, Loy, 5, dtype=int)
+    #     axs[i].set_yticks(y_ticks)
+    #     axs[i].set_yticklabels(y_labels)
+    #     axs[i].set_ylabel('Y (m)')
+    #     axs[i].tick_params(axis='y', rotation=90)
+
+    #     divider = make_axes_locatable(axs[i])
+    #     cax = divider.append_axes("right", size="7%", pad=0.05)  # Adjust size and padding
+    #     cbar = plt.colorbar(im, cax=cax, ticks=[ceil(head_solved.min()), int(head_solved.max())])
+    #     cbar.ax.tick_params(labelsize=8, rotation=270)  # Reduce tick font size
+    #     cbar.set_label('Hydraulic Head (m)', fontsize=10, va="top", rotation=270)  # Adjust label padding
+
+    # plt.show()

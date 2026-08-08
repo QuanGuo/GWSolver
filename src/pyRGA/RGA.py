@@ -7,16 +7,9 @@ import numpy as np
 import time
 import json
 from scipy.linalg import svd
-import os
 from scipy.special import gamma
-
-# Create figures directory if it doesn't exist
-figs_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'figs')
-if not os.path.exists(figs_dir):
-    os.makedirs(figs_dir)
-
-from .hydraulic_tomography import hydraulic_tomography
-from .utils import plot_conductivity_fields, plot_parameters, plot_observations_vs_predictions, plot_head_fields, plot_history, plot_parameter_history
+from hydraulic_tomography import hydraulic_tomography, ht_transient
+from utils import plot_conductivity_fields, plot_parameters, plot_observations_vs_predictions, plot_head_fields, plot_history, plot_parameter_history
 import matplotlib.pyplot as plt
 
 def generate_random_field(n_reals=1, Nx=256, Ny=256,
@@ -89,6 +82,25 @@ def observation_operator(hydraulic_heads, well_nodes):
         obs[i] = hydraulic_heads[i, well_nodes[:i]+well_nodes[i+1:]].flatten()
     return obs.flatten()
 
+def transient_observation_operator(HT_transient_heads, well_nodes, pump_id_list=[], timesteps=[]):
+    """
+    Create observation operator for transient hydraulic tomography.
+    
+    Args:
+        hydraulic_heads (ndarray): Matrix of hydraulic heads for each well
+        well_nodes (list): List of well node indices
+        
+    Returns:
+        ndarray: Flattened vector of head differences between well pairs
+    """
+    if len(timesteps) == 0:
+        timesteps = np.arange(HT_transient_heads.shape[1])
+    if len(pump_id_list) == 0:
+        pump_id_list = np.arange(HT_transient_heads.shape[0])
+    obs = np.empty((len(pump_id_list), len(timesteps), len(well_nodes) - 1))
+    for i, pid in enumerate(pump_id_list):
+        obs[i, timesteps] = HT_transient_heads[pid, timesteps][:, well_nodes[:pid]+well_nodes[pid+1:]]
+    return obs.flatten()
 
 def forward_model(b, V, Q, well_nodes):
     """
@@ -110,6 +122,26 @@ def forward_model(b, V, Q, well_nodes):
     yp = observation_operator(hydraulic_heads, well_nodes)
     return yp
 
+def transient_forward_model(b, V, Q, pump_well_nodes, obv_well_nodes, dt, t_max, pump_id_list, timesteps, initial_head=None):
+    """
+    Forward model for transient hydraulic tomography.
+
+    Args:
+        b (k,): Vector of coefficients for basis functions
+        V (N_logK, k): Matrix of basis functions
+        Q scaler: Pumping rates at each well
+        well_nodes (ndarray): Indices of well locations in the model grid
+
+    Returns:
+        ndarray: Vector of observed hydraulic head differences between well pairs
+    """
+    alpha = b[:-1]
+    mu = b[-1]
+    s = np.squeeze(V @ alpha[:, np.newaxis],axis=1)
+    hydraulic_heads = ht_transient(np.exp(s+mu), pump_well_nodes, Q, dt, t_max, initial_head)
+    yp = transient_observation_operator(hydraulic_heads, obv_well_nodes, pump_id_list, timesteps)
+    return yp
+
 def gauss_newton_dynamic_lambda(
     f,
     b0,
@@ -120,7 +152,8 @@ def gauss_newton_dynamic_lambda(
     history={},
     adaptive_lambda=True,
     anneal_lambda=True,
-    min_lambda=1e-5
+    min_lambda=1e-5,
+    json_file='history.json'
 ):
     """
     Gauss-Newton optimization with dynamic lambda adjustment.
@@ -206,8 +239,8 @@ def gauss_newton_dynamic_lambda(
         history["lambda"].append(float(lam))
         history["step_norm"].append(float(step_norm))
         history["time"].append(float(elapsed))
-        with open('history.json', 'w') as history_file:
-            json_history = {    
+        with open(json_file, 'w') as history_file:
+            json_history = {
                 "alpha": [arr.tolist() for arr in history["alpha"]],
                 "mu": history["mu"],
                 "loss": history["loss"],
@@ -216,7 +249,7 @@ def gauss_newton_dynamic_lambda(
                 "time": history["time"],
                 "true_alpha": history["true_alpha"].tolist(),
                 "true_mu": history["true_mu"],
-                "true_y": history["true_y"].tolist(),
+                "y_obs": history["y_obs"].tolist(),
             }
             json.dump(json_history, history_file, indent=4)
 
@@ -250,7 +283,7 @@ def load_history(filename='history.json'):
     history['alpha'] = [np.array(b) for b in history['alpha']]
     history['mu'] = np.array(history['mu'])
     history['true_alpha'] = np.array(history['true_alpha'])
-    history['true_y'] = np.array(history['true_y'])
+    history['y_obs'] = np.array(history['y_obs'])
     return history
 
 
@@ -326,7 +359,7 @@ def perform_pca(Nx, Ny, NR=400, cov_type='gaussian', variance=1.0, lx=0.15, ly=0
     beta = np.mean(ucr)
     
     # Perform SVD
-    U, S, Vt = svd(ucr - mu, full_matrices=False)
+    _, S, Vt = svd(ucr - mu, full_matrices=False)
     
     # Generate pseudo-eigenvectors
     V = np.expand_dims(np.sqrt(S[:k]), axis=1) * Vt[:k]
@@ -492,13 +525,13 @@ if __name__ == "__main__":
     y0 = observation_operator(hydraulic_heads, well_nodes)
     
     # Add measurement noise
-    y, obv_error = add_noise(y0, noise_level=0.05)
+    y_obs, obv_error = add_noise(y0, noise_level=0.05)
 
     # Save true values to json before optimization
     initial_history = {
         'true_alpha': alpha,
         'true_mu': mu,
-        'true_y': y,
+        'y_obs': y_obs,
         'alpha': [],
         'mu': [],
         'loss': [],
@@ -512,7 +545,7 @@ if __name__ == "__main__":
     b, opt_history = gauss_newton_dynamic_lambda(
         lambda b: forward_model(b, V.T, Q, well_nodes),
         b0=np.concatenate((np.zeros(k), np.array([beta]))),
-        y_obs=y,
+        y_obs=y_obs,
         lam_init=1e-3,
         max_iter=10,
         tol=1e-5,
@@ -558,7 +591,7 @@ if __name__ == "__main__":
     mae, rmse, mse, l2_relative_error = head_metrics(true_head_field[pump_id], predicted_head_field[pump_id])
 
     # Extract the true and predicted heads
-    true_heads = history['true_y']
+    true_heads = history['y_obs']
     predicted_heads = observation_operator(predicted_head_field, well_nodes)
     mae, rmse, mse, l2_relative_error = head_metrics(true_heads, predicted_heads)
 
